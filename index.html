@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>قص المستمسكات الذكي</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:20px;background:#0b1220;color:#fff;font-family:Arial,sans-serif}
+main{max-width:650px;margin:auto}
+header{text-align:center;padding:25px 5px}
+header h1{color:#65dfc4}
+header p,.note{color:#aab8cc;line-height:1.8}
+.card{background:#172337;border:1px solid #34445b;border-radius:18px;padding:18px;margin:15px 0}
+h3{margin-top:0}
+input{width:100%;padding:15px;background:#24364c;border-radius:12px;color:white}
+button{border:0;border-radius:12px;padding:14px;background:#65dfc4;color:#09221c;font-weight:bold;font-size:15px;cursor:pointer}
+.actions{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:15px}
+.secondary{background:#344b66;color:white}
+button:disabled{opacity:.4}
+#status{color:#aab8cc;margin-top:15px;line-height:1.7}
+#results{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.item{background:#24364c;border-radius:12px;padding:8px;min-width:0}
+.item img{width:100%;height:150px;object-fit:contain;background:white;border-radius:8px}
+.item button{width:100%;margin-top:8px;font-size:12px;padding:10px}
+</style>
+</head>
+<body>
+<main>
+<header>
+<h1>▧ قصّ المستمسكات الذكي</h1>
+<p>قص تلقائي للمستمسكات وتصحيح الزوايا وحفظ الصور بصيغ JPG وPDF.</p>
+</header>
+
+<section class="card">
+<h3>① اختر صورة المستمسك</h3>
+<input type="file" id="file" accept="image/*">
+<div class="actions">
+<button id="single" disabled>قص مستمسك واحد</button>
+<button id="multiple" class="secondary" disabled>قص عدة مستمسكات</button>
+</div>
+<div id="status">اختر صورة للبدء.</div>
+</section>
+
+<section class="card">
+<h3>② الصور المقصوصة</h3>
+<div id="results"></div>
+<div class="actions">
+<button id="download" disabled>تحميل JPG</button>
+<button id="makepdf" class="secondary" disabled>إنشاء PDF</button>
+</div>
+</section>
+
+<section class="card">
+<h3>ملاحظات</h3>
+<p class="note">لأفضل نتيجة، صوّر المستمسك على خلفية مختلفة اللون وبإضاءة جيدة. تتم معالجة الصور داخل المتصفح ولا يتم رفعها إلى خادم.</p>
+</section>
+</main>
+
+<script>
+let img=null,results=[];
+const file=document.getElementById('file');
+const status=document.getElementById('status');
+const single=document.getElementById('single');
+const multiple=document.getElementById('multiple');
+
+function say(t){status.textContent=t}
+
+file.onchange=()=>{
+ const f=file.files[0];
+ if(!f)return;
+ img=new Image();
+ img.onload=()=>{
+  single.disabled=false;
+  multiple.disabled=false;
+  results=[];
+  render();
+  say('تم تحميل الصورة. اختر طريقة القص.');
+ };
+ img.src=URL.createObjectURL(f);
+};
+
+function loadScript(url){
+ return new Promise((resolve,reject)=>{
+  const s=document.createElement('script');
+  s.src=url;s.onload=resolve;s.onerror=reject;
+  document.head.appendChild(s);
+ });
+}
+
+async function loadCV(){
+ if(window.cv&&window.cv.Mat)return;
+ say('جارٍ تحميل محرك القص...');
+ await loadScript('https://docs.opencv.org/4.x/opencv.js');
+ await new Promise((resolve,reject)=>{
+  let start=Date.now();
+  let timer=setInterval(()=>{
+   if(window.cv&&window.cv.Mat){
+    clearInterval(timer);resolve();
+   }
+   if(Date.now()-start>30000){
+    clearInterval(timer);reject(new Error('تعذر تحميل محرك القص. تحقق من الإنترنت.'));
+   }
+  },100);
+ });
+}
+
+function order(p){
+ let sum=p.map(x=>x.x+x.y);
+ let diff=p.map(x=>x.y-x.x);
+ return [
+  p[sum.indexOf(Math.min(...sum))],
+  p[diff.indexOf(Math.min(...diff))],
+  p[sum.indexOf(Math.max(...sum))],
+  p[diff.indexOf(Math.max(...diff))]
+ ];
+}
+
+function crop(mat,points){
+ let p=order(points);
+ const d=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+ let w=Math.round(Math.max(d(p[0],p[1]),d(p[2],p[3])));
+ let h=Math.round(Math.max(d(p[0],p[3]),d(p[1],p[2])));
+ w=Math.max(100,w);h=Math.max(100,h);
+ let a=cv.matFromArray(4,1,cv.CV_32FC2,
+ [p[0].x,p[0].y,p[1].x,p[1].y,p[2].x,p[2].y,p[3].x,p[3].y]);
+ let b=cv.matFromArray(4,1,cv.CV_32FC2,
+ [0,0,w,0,w,h,0,h]);
+ let m=cv.getPerspectiveTransform(a,b);
+ let dst=new cv.Mat();
+ cv.warpPerspective(mat,dst,m,new cv.Size(w,h));
+ let canvas=document.createElement('canvas');
+ cv.imshow(canvas,dst);
+ let url=canvas.toDataURL('image/jpeg',.95);
+ a.delete();b.delete();m.delete();dst.delete();
+ return url;
+}
+
+async function process(mode){
+ if(!img)return;
+ single.disabled=true;multiple.disabled=true;
+ say('جارٍ اكتشاف حدود المستمسكات...');
+ try{
+  await loadCV();
+  let canvas=document.createElement('canvas');
+  canvas.width=img.naturalWidth;
+  canvas.height=img.naturalHeight;
+  canvas.getContext('2d').drawImage(img,0,0);
+
+  let mat=cv.imread(canvas);
+  let gray=new cv.Mat(),blur=new cv.Mat(),edges=new cv.Mat();
+  let contours=new cv.MatVector(),hier=new cv.Mat();
+
+  cv.cvtColor(mat,gray,cv.COLOR_RGBA2GRAY);
+  cv.GaussianBlur(gray,blur,new cv.Size(5,5),0);
+  cv.Canny(blur,edges,50,150);
+  let kernel=cv.Mat.ones(3,3,cv.CV_8U);
+  cv.dilate(edges,edges,kernel);
+  cv.findContours(edges,contours,hier,cv.RETR_LIST,cv.CHAIN_APPROX_SIMPLE);
+
+  let found=[];
+  let area=mat.rows*mat.cols;
+
+  for(let i=0;i<contours.size();i++){
+   let c=contours.get(i);
+   let peri=cv.arcLength(c,true);
+   let approx=new cv.Mat();
+   cv.approxPolyDP(c,approx,.02*peri,true);
+   let size=Math.abs(cv.contourArea(approx));
+
+   if(approx.rows===4&&size>area*.04&&size<area*.95&&cv.isContourConvex(approx)){
+    let pts=[];
+    for(let j=0;j<4;j++)
+     pts.push({x:approx.intAt(j,0),y:approx.intAt(j,1)});
+    found.push({size,pts});
+   }
+   c.delete();approx.delete();
+  }
+
+  found.sort((a,b)=>b.size-a.size);
+  let unique=[];
+  for(let f of found){
+   let cx=f.pts.reduce((s,p)=>s+p.x,0)/4;
+   let cy=f.pts.reduce((s,p)=>s+p.y,0)/4;
+   let duplicate=unique.some(g=>{
+    let x=g.pts.reduce((s,p)=>s+p.x,0)/4;
+    let y=g.pts.reduce((s,p)=>s+p.y,0)/4;
+    return Math.hypot(cx-x,cy-y)<Math.min(mat.cols,mat.rows)*.05;
+   });
+   if(!duplicate)unique.push(f);
+  }
+
+  if(mode==='single')unique=unique.slice(0,1);
+  results=[];
+
+  if(unique.length){
+   unique.slice(0,10).forEach((f,i)=>{
+    results.push({name:'مستمسك '+(i+1),url:crop(mat,f.pts)});
+   });
+   say('اكتمل القص. عدد المستمسكات: '+results.length);
+  }else{
+   results.push({name:'الصورة الأصلية',url:canvas.toDataURL('image/jpeg',.95)});
+   say('لم تُكتشف حدود واضحة. احتفظنا بالصورة الأصلية بدلاً من قصها بشكل خاطئ.');
+  }
+
+  mat.delete();gray.delete();blur.delete();edges.delete();
+  contours.delete();hier.delete();kernel.delete();
+  render();
+
+ }catch(e){
+  say(e.message||'حدث خطأ. حاول مجدداً.');
+ }
+ single.disabled=false;multiple.disabled=false;
+}
+
+function render(){
+ const box=document.getElementById('results');
+ box.innerHTML='';
+ results.forEach((r,i)=>{
+  let div=document.createElement('div');
+  div.className='item';
+  let image=document.createElement('img');
+  image.src=r.url;
+  let label=document.createElement('p');
+  label.textContent=r.name;
+  let btn=document.createElement('button');
+  btn.textContent='تحميل الصورة';
+  btn.onclick=()=>save(r.url,'document-'+(i+1)+'.jpg');
+  div.append(image,label,btn);
+  box.appendChild(div);
+ });
+ document.getElementById('download').disabled=!results.length;
+ document.getElementById('makepdf').disabled=!results.length;
+}
+
+function save(url,name){
+ let a=document.createElement('a');
+ a.href=url;a.download=name;a.click();
+}
+
+single.onclick=()=>process('single');
+multiple.onclick=()=>process('multiple');
+
+document.getElementById('download').onclick=()=>{
+ results.forEach((r,i)=>save(r.url,'document-'+(i+1)+'.jpg'));
+};
+
+document.getElementById('makepdf').onclick=async()=>{
+ try{
+  say('جارٍ تجهيز PDF...');
+  if(!window.jspdf)
+   await loadScript('https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js');
+
+  const {jsPDF}=window.jspdf;
+  let pdf=new jsPDF('p','mm','a4');
+
+  for(let i=0;i<results.length;i++){
+   if(i)pdf.addPage();
+   let im=new Image();
+   im.src=results[i].url;
+   await new Promise(resolve=>im.onload=resolve);
+   let scale=Math.min(190/im.width,277/im.height);
+   let w=im.width*scale,h=im.height*scale;
+   pdf.addImage(results[i].url,'JPEG',(210-w)/2,(297-h)/2,w,h);
+  }
+  pdf.save('المستمسكات.pdf');
+  say('تم إنشاء ملف PDF بنجاح.');
+ }catch(e){
+  say('تعذر إنشاء PDF. تحقق من الإنترنت وحاول مجدداً.');
+ }
+};
+</script>
+</body>
+</html>
